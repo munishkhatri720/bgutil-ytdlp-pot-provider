@@ -1,0 +1,86 @@
+name: Publish Docker image to GHCR
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ghcr:
+    name: Build and push to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      image: ghcr.io/${{ github.repository }} # like `ghcr.io/brainicism/bgutil-ytdlp-pot-provider`
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set variables
+        id: set_variables
+        run: echo "version=$(jq -r .version server/package.json)" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Docker meta (node)
+        id: node_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=node,enable={{is_default_branch}}
+            type=raw,value=${{ steps.set_variables.outputs.version }},enable={{is_default_branch}}
+            type=raw,value=${{ steps.set_variables.outputs.version }}-node,enable={{is_default_branch}}
+            type=sha,suffix=-node
+            type=ref,suffix=-node,event=branch
+
+      - name: Docker meta (deno)
+        id: deno_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.image }}
+          tags: |
+            type=raw,value=deno,enable={{is_default_branch}}
+            type=raw,value=${{ steps.set_variables.outputs.version }}-deno,enable={{is_default_branch}}
+            type=sha,suffix=-deno
+            type=ref,suffix=-deno,event=branch
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push (node)
+        uses: docker/build-push-action@v6
+        with:
+          context: server/
+          target: server_node
+          platforms: "linux/amd64,linux/arm64"
+          push: true
+          tags: ${{ steps.node_meta.outputs.tags }}
+          labels: ${{ steps.node_meta.outputs.labels }}
+          annotations: ${{ steps.node_meta.outputs.annotations }}
+          cache-from: type=gha,scope=node
+          cache-to: type=gha,mode=max,scope=node
+
+      - name: Build and push (deno)
+        uses: docker/build-push-action@v6
+        with:
+          context: server/
+          target: server_deno
+          platforms: "linux/amd64,linux/arm64"
+          push: true
+          tags: ${{ steps.deno_meta.outputs.tags }}
+          labels: ${{ steps.deno_meta.outputs.labels }}
+          annotations: ${{ steps.deno_meta.outputs.annotations }}
+          cache-from: type=gha,scope=deno
+          cache-to: type=gha,mode=max,scope=deno
