@@ -2,6 +2,7 @@ import { InvalidProxyError, SessionManager } from "./session_manager.ts";
 import { strerror, VERSION } from "./utils.ts";
 import { Command } from "commander";
 import express from "express";
+import crypto from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 
@@ -23,11 +24,16 @@ const program = new Command()
         collectHosts,
         [],
     )
+    .option(
+        "-t, --auth-token <TOKEN>",
+        "Require clients to send this bearer token; can also be set with the BGUTIL_AUTH_TOKEN environment variable",
+    )
     .parse();
 
 const cliOptions = program.opts();
 
 const PORT_NUMBER = cliOptions.port || 4416;
+const AUTH_TOKEN = cliOptions.authToken || process.env.BGUTIL_AUTH_TOKEN;
 
 const httpServer = express();
 httpServer.use((request, response, next) => {
@@ -41,6 +47,30 @@ httpServer.use((request, response, next) => {
     }
     next();
 });
+
+// Compare fixed-length digests so the check is constant-time and doesn't
+// leak the token length.
+function digest(value: string) {
+    return crypto.createHash("sha256").update(value).digest();
+}
+
+if (AUTH_TOKEN) {
+    const expectedDigest = digest(AUTH_TOKEN);
+    httpServer.use((request, response, next) => {
+        const [scheme, token] = request.get("Authorization")?.split(" ") ?? [];
+        if (
+            scheme?.toLowerCase() !== "bearer" ||
+            !token ||
+            !crypto.timingSafeEqual(digest(token), expectedDigest)
+        ) {
+            return response
+                .status(401)
+                .set("WWW-Authenticate", "Bearer")
+                .send({ error: "Missing or invalid auth token" });
+        }
+        next();
+    });
+}
 httpServer.use(express.json());
 
 // Bind the IPv6 and IPv4 localhost addresses as separate sockets, with the
@@ -96,7 +126,8 @@ async function startServer() {
         process.exit(1);
     }
     console.log(
-        `Started POT server (v${VERSION}) on address ${bound.join(", ")}`,
+        `Started POT server (v${VERSION}) on address ${bound.join(", ")}` +
+            (AUTH_TOKEN ? " with authentication enabled" : ""),
     );
 }
 

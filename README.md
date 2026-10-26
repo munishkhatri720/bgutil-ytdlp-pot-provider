@@ -60,7 +60,7 @@ docker run --name bgutil-provider -d --init \
 ```
 
 > [!WARNING]
-> Omitting `127.0.0.1` from the port mapping publishes the server on all host interfaces by default. This may allow untrusted local or external clients to access the unauthenticated server, generate tokens, consume system and network resources and potentially perform RCE.
+> Omitting `127.0.0.1` from the port mapping publishes the server on all host interfaces by default. This may allow untrusted local or external clients to access the server, generate tokens, consume system and network resources and potentially perform RCE. If the server must be reachable from other machines, [enable authentication](#authentication).
 
 Our Docker image comes in two flavors: Node.js or Deno. The `:latest` tag defaults to Node.js, but you can specify an alternate version/flavor like so: `brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno`. The `:node` tag also points to the latest Node.js image, and `:deno` points to the latest Deno image.
 
@@ -88,6 +88,39 @@ deno run --allow-env --allow-net --allow-ffi=. --allow-read=. ../src/main.ts [OP
 
 - `-p, --port <PORT>`: The port on which the server listens.
 - `-H, --host <HOST>`: Host/IP to listen on. Repeat it or separate values with commas to bind multiple addresses. Defaults to localhost only (`127.0.0.1` and `::1`).
+- `-t, --auth-token <TOKEN>`: Require clients to authenticate with this token. See [Authentication](#authentication).
+
+##### Authentication
+
+By default the server accepts requests from anyone who can reach it. To require a token, set the `BGUTIL_AUTH_TOKEN` environment variable (preferred, as command line arguments are visible to other users on the system) or pass `--auth-token`. Every request must then include an `Authorization: Bearer <TOKEN>` header, otherwise it is rejected with `401 Unauthorized`.
+
+Use a long random token made of letters and digits only (commas and semicolons conflict with yt-dlp's `--extractor-args` syntax), for example from `openssl rand -hex 32`:
+
+```shell
+docker run --name bgutil-provider -d --init \
+  -e BGUTIL_AUTH_TOKEN=YOUR_TOKEN \
+  -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider
+```
+
+Or with Docker Compose, keeping the token in a `.env` file next to `compose.yaml` (`BGUTIL_AUTH_TOKEN=YOUR_TOKEN`):
+
+```yaml
+services:
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider
+    container_name: bgutil-provider
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4416:4416"
+    environment:
+      BGUTIL_AUTH_TOKEN: ${BGUTIL_AUTH_TOKEN:?set BGUTIL_AUTH_TOKEN in .env}
+```
+
+Then pass the same token to the plugin with the `youtubepot-bgutilhttp:auth_token` extractor argument (see [Usage](#usage)).
+
+> [!IMPORTANT]
+> The token is sent in plain text over HTTP. If the server is exposed beyond a trusted network, put it behind a reverse proxy that terminates TLS and use an `https://` `base_url`.
 
 #### (b) Generation Script Option
 
@@ -119,6 +152,12 @@ If the provider server is reachable at a different URL, pass it to yt-dlp via `b
 
 ```shell
 --extractor-args "youtubepot-bgutilhttp:base_url=http://127.0.0.1:8080"
+```
+
+If the server has [authentication](#authentication) enabled, also pass its token via `auth_token`:
+
+```shell
+--extractor-args "youtubepot-bgutilhttp:base_url=https://pot.example.com;auth_token=YOUR_TOKEN"
 ```
 
 Note that when you pass multiple extractor arguments to one provider or extractor, they are to be separated by semicolons(`;`) as shown above.

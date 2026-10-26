@@ -49,6 +49,12 @@ class BgUtilHTTPPTP(BgUtilPTPBase):
             f'No base_url provided, defaulting to {self.DEFAULT_BASE_URL}')
         return self.DEFAULT_BASE_URL
 
+    @functools.cached_property
+    def _auth_headers(self):
+        auth_token = self._configuration_arg(
+            'auth_token', default=[None], casesense=True)[0]
+        return {'Authorization': f'Bearer {auth_token}'} if auth_token else {}
+
     def _check_server_availability(self, ctx: PoTokenRequest):
         if self._last_server_check + 60 > time.time():
             return self._server_available
@@ -58,7 +64,8 @@ class BgUtilHTTPPTP(BgUtilPTPBase):
             self.logger.trace(
                 f'Checking server availability at {self._base_url}/ping')
             response = json.load(self._request_webpage(Request(
-                f'{self._base_url}/ping', extensions={'timeout': self._GET_SERVER_VSN_TIMEOUT}, proxies={'all': None}),
+                f'{self._base_url}/ping', headers=self._auth_headers,
+                extensions={'timeout': self._GET_SERVER_VSN_TIMEOUT}, proxies={'all': None}),
                 note=False))
         except TransportError as e:
             # the server may be down
@@ -72,6 +79,11 @@ class BgUtilHTTPPTP(BgUtilPTPBase):
 
             return
         except HTTPError as e:
+            if e.status == 401:
+                self._warn_and_raise(
+                    f'The HTTP server at {self._base_url} rejected the auth token. '
+                    "Pass the server's token via 'youtubepot-bgutilhttp:auth_token'")
+                return
             # may be an old server, don't raise
             self.logger.warning(
                 f'HTTP Error reaching GET /ping (caused by {e!r})', once=True)
@@ -130,7 +142,7 @@ class BgUtilHTTPPTP(BgUtilPTPBase):
                         'proxy': request.request_proxy,
                         'innertube_context': request.innertube_context,
                         'source_address': request.request_source_address,
-                    }).encode(), headers={'Content-Type': 'application/json'},
+                    }).encode(), headers={'Content-Type': 'application/json', **self._auth_headers},
                     extensions={'timeout': self._GETPOT_TIMEOUT}, proxies={'all': None}),
                 note=f'Generating a {request.context.value} PO Token for '
                 f'{request.internal_client_name} client via bgutil HTTP server',

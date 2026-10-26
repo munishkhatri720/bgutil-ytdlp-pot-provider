@@ -11,6 +11,11 @@ If you are interested in using the script/server standalone for generating your 
 
 - `-p, --port <PORT>`: The port on which the server listens.
 - `-H, --host <HOST>`: Host/IP to listen on. Repeat it or separate values with commas to bind multiple addresses. Defaults to localhost only (`127.0.0.1` and `::1`).
+- `-t, --auth-token <TOKEN>`: Require every request to include an `Authorization: Bearer <TOKEN>` header. Requests without a valid token get `401 Unauthorized`.
+
+**Environment Variables**
+
+- **BGUTIL_AUTH_TOKEN**: Same as `--auth-token`. Preferred, since command line arguments are visible to other users on the system.
 
 **Endpoints**
 
