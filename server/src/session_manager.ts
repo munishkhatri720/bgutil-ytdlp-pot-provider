@@ -16,7 +16,7 @@ import { isIPv4, isIPv6 } from "node:net";
 import { ProxyAgent } from "proxy-agent";
 import { JSDOM } from "jsdom";
 import { Innertube, Context as InnertubeContext } from "youtubei.js";
-import { elapsed, strerror } from "./utils.ts";
+import { elapsed, logContext, strerror } from "./utils.ts";
 
 // The plugin gives up on a request after this long
 const PLUGIN_TIMEOUT_SECS = 20;
@@ -466,48 +466,55 @@ export class SessionManager {
             `Next background refresh of the POT minter for ${label} at ` +
                 new Date(Date.now() + delayMs).toISOString(),
         );
-        const timer = setTimeout(async () => {
-            this._refreshTimers.delete(key);
-            const current = this._minterCache.get(key);
-            if (!current) return;
-            if (!current.used) {
-                // Nobody minted with this one since the last refresh, so
-                // stop keeping it warm; the next request regenerates it
-                this._minterCache.delete(key);
-                this.logger.log(
-                    `Dropped idle POT minter for ${label}, ` +
-                        `${this._minterCache.size} minter(s) left`,
-                );
-                return;
-            }
-            this.logger.log(`Refreshing POT minter for ${label} in background`);
-            try {
-                // The plugin-supplied challenge is long stale by now
-                await this.generateTokenMinter(
-                    cacheSpec,
-                    potCtx,
-                    undefined,
-                    innertubeContext,
-                );
-            } catch (e) {
-                const retryMs = SessionManager.REFRESH_RETRY_MS;
-                const canRetry =
-                    Date.now() + retryMs < current.expiry.getTime();
-                this.logger.warn(
-                    `Background minter refresh for ${label} failed (${strerror(e)})` +
-                        (canRetry
-                            ? `, retrying in ${retryMs / 1000}s`
-                            : ", the next request will regenerate it"),
-                );
-                if (canRetry)
-                    this.scheduleRefresh(
-                        cacheSpec,
-                        potCtx,
-                        innertubeContext,
-                        retryMs,
+        // Own log tag, rather than that of the request that scheduled it
+        const timer = setTimeout(
+            () =>
+                logContext.run("refresh", async () => {
+                    this._refreshTimers.delete(key);
+                    const current = this._minterCache.get(key);
+                    if (!current) return;
+                    if (!current.used) {
+                        // Nobody minted with this one since the last refresh, so
+                        // stop keeping it warm; the next request regenerates it
+                        this._minterCache.delete(key);
+                        this.logger.log(
+                            `Dropped idle POT minter for ${label}, ` +
+                                `${this._minterCache.size} minter(s) left`,
+                        );
+                        return;
+                    }
+                    this.logger.log(
+                        `Refreshing POT minter for ${label} in background`,
                     );
-            }
-        }, delayMs);
+                    try {
+                        // The plugin-supplied challenge is long stale by now
+                        await this.generateTokenMinter(
+                            cacheSpec,
+                            potCtx,
+                            undefined,
+                            innertubeContext,
+                        );
+                    } catch (e) {
+                        const retryMs = SessionManager.REFRESH_RETRY_MS;
+                        const canRetry =
+                            Date.now() + retryMs < current.expiry.getTime();
+                        this.logger.warn(
+                            `Background minter refresh for ${label} failed (${strerror(e)})` +
+                                (canRetry
+                                    ? `, retrying in ${retryMs / 1000}s`
+                                    : ", the next request will regenerate it"),
+                        );
+                        if (canRetry)
+                            this.scheduleRefresh(
+                                cacheSpec,
+                                potCtx,
+                                innertubeContext,
+                                retryMs,
+                            );
+                    }
+                }),
+            delayMs,
+        );
         this._refreshTimers.set(key, timer);
     }
 

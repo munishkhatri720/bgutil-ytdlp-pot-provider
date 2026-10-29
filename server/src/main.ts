@@ -1,10 +1,18 @@
 import { InvalidProxyError, SessionManager } from "./session_manager.ts";
-import { elapsed, strerror, VERSION } from "./utils.ts";
+import {
+    elapsed,
+    formatConsoleOutput,
+    logContext,
+    strerror,
+    VERSION,
+} from "./utils.ts";
 import { Command } from "commander";
 import express from "express";
 import crypto from "node:crypto";
 import http from "node:http";
 import net from "node:net";
+
+formatConsoleOutput();
 
 function collectHosts(host: string, previous: string[]) {
     previous.push(
@@ -36,6 +44,50 @@ const PORT_NUMBER = cliOptions.port || 4416;
 const AUTH_TOKEN = cliOptions.authToken || process.env.BGUTIL_AUTH_TOKEN;
 
 const httpServer = express();
+
+// Log when each request arrives and finishes, tagging every line written
+// while handling it with a request number
+let requestCount = 0;
+httpServer.use((request, response, next) => {
+    const tag = `#${++requestCount}`;
+    const start = performance.now();
+    const { method, path } = request;
+    // Health checks would drown out everything else
+    const quiet = path === "/ping";
+    const log = (write: (msg: string) => void, msg: string) =>
+        logContext.run(tag, () => write(msg));
+
+    log(
+        quiet ? console.debug : console.log,
+        `Request received: ${method} ${path} from ${request.socket.remoteAddress}`,
+    );
+    // once: Deno emits "close" again when the response is sent after the
+    // client already disconnected
+    response.once("close", () => {
+        if (!response.writableFinished) {
+            // e.g. the plugin hitting its timeout
+            log(
+                console.warn,
+                `Client disconnected after ${elapsed(start)} before the response to ${method} ${path} was sent`,
+            );
+            return;
+        }
+        const { statusCode } = response;
+        log(
+            statusCode >= 500
+                ? console.error
+                : statusCode >= 400
+                  ? console.warn
+                  : quiet
+                    ? console.debug
+                    : console.log,
+            `Request finished: ${method} ${path} ${statusCode} in ${elapsed(start)}`,
+        );
+    });
+    response.locals.logTag = tag;
+    logContext.run(tag, next);
+});
+
 httpServer.use((request, response, next) => {
     if (
         request.get("Origin") ||
@@ -72,6 +124,10 @@ if (AUTH_TOKEN) {
     });
 }
 httpServer.use(express.json());
+// Body parsing loses the log context, so enter it again for the handlers
+httpServer.use((request, response, next) =>
+    logContext.run(response.locals.logTag, next),
+);
 
 // Bind the IPv6 and IPv4 localhost addresses as separate sockets, with the
 // IPv6 one restricted to IPv6 so the two never overlap. Every address is
