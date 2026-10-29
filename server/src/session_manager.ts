@@ -171,6 +171,8 @@ type TokenMinter = {
     expiry: Date;
     integrityToken: string;
     minter: WebPoMinter;
+    // Whether a POT was minted with it; idle minters aren't refreshed
+    used: boolean;
 };
 
 type MinterCache = Map<string, TokenMinter>;
@@ -188,12 +190,15 @@ export type ChallengeData = {
 export class SessionManager {
     // hardcoded API key that has been used by youtube for years
     private static readonly REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
+    private static readonly REFRESH_LEAD_MS = 10 * 60 * 1000;
+    private static readonly REFRESH_RETRY_MS = 60 * 1000;
     private static hasDom = false;
     private _minterCache: MinterCache = new Map();
     // Minters being generated, keyed like _minterCache, so concurrent
     // requests share one BotGuard run instead of each starting their own
     private _pendingMinters = new Map<string, Promise<TokenMinter>>();
     private _interpreterCache?: { url: string; js: string };
+    private _refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private TOKEN_TTL_HOURS: number;
     private logger: Logger;
 
@@ -201,6 +206,10 @@ export class SessionManager {
         shouldLog = true,
         // This needs to be reworked as POTs are IP-bound
         private youtubeSessionDataCaches?: YoutubeSessionDataCaches,
+        // Regenerate minters shortly before they expire instead of on the
+        // next request. Only for long-running processes, since the timers
+        // keep the process alive.
+        private backgroundRefresh = false,
     ) {
         this.logger = new Logger(shouldLog);
         this.TOKEN_TTL_HOURS = process.env.TOKEN_TTL
@@ -235,6 +244,8 @@ export class SessionManager {
     public invalidateCaches() {
         this.setYoutubeSessionDataCaches();
         this._minterCache.clear();
+        this._refreshTimers.forEach((timer) => clearTimeout(timer));
+        this._refreshTimers.clear();
     }
 
     public invalidateIT() {
@@ -402,6 +413,54 @@ export class SessionManager {
         return js;
     }
 
+    private scheduleRefresh(
+        cacheSpec: CacheSpec,
+        potCtx: PotContext,
+        innertubeContext: InnertubeContext | undefined,
+        delayMs: number,
+    ) {
+        const { key } = cacheSpec;
+        clearTimeout(this._refreshTimers.get(key));
+        const timer = setTimeout(async () => {
+            this._refreshTimers.delete(key);
+            const current = this._minterCache.get(key);
+            if (!current) return;
+            if (!current.used) {
+                // Nobody minted with this one since the last refresh, so
+                // stop keeping it warm; the next request regenerates it
+                this.logger.debug(`Dropping idle POT minter for ${key}`);
+                this._minterCache.delete(key);
+                return;
+            }
+            this.logger.log(`Refreshing POT minter for ${key} in background`);
+            try {
+                // The plugin-supplied challenge is long stale by now
+                await this.generateTokenMinter(
+                    cacheSpec,
+                    potCtx,
+                    undefined,
+                    innertubeContext,
+                );
+            } catch (e) {
+                const retryMs = SessionManager.REFRESH_RETRY_MS;
+                const canRetry =
+                    Date.now() + retryMs < current.expiry.getTime();
+                this.logger.warn(
+                    `Background minter refresh for ${key} failed (${e?.message})` +
+                        (canRetry ? ", retrying" : ""),
+                );
+                if (canRetry)
+                    this.scheduleRefresh(
+                        cacheSpec,
+                        potCtx,
+                        innertubeContext,
+                        retryMs,
+                    );
+            }
+        }, delayMs);
+        this._refreshTimers.set(key, timer);
+    }
+
     private generateTokenMinter(
         cacheSpec: CacheSpec,
         potCtx: PotContext,
@@ -499,15 +558,24 @@ export class SessionManager {
                 `Generated IntegrityToken: ${JSON.stringify(integrityTokenData)}`,
             );
 
+            const ttlMs = estimatedTtlSecs * 1000;
             const tokenMinter: TokenMinter = {
-                expiry: new Date(Date.now() + estimatedTtlSecs * 1000),
+                expiry: new Date(Date.now() + ttlMs),
                 integrityToken,
                 minter: await WebPoMinter.create(
                     integrityTokenData,
                     webPoSignalOutput,
                 ),
+                used: false,
             };
             this._minterCache.set(cacheSpec.key, tokenMinter);
+            if (this.backgroundRefresh)
+                this.scheduleRefresh(
+                    cacheSpec,
+                    potCtx,
+                    innertubeContext,
+                    Math.max(ttlMs - SessionManager.REFRESH_LEAD_MS, ttlMs / 2),
+                );
             return tokenMinter;
         } catch (e) {
             throw new Error(`Failed to generate an integrity token.`, {
@@ -521,6 +589,7 @@ export class SessionManager {
         tokenMinter: TokenMinter,
     ): Promise<YoutubeSessionData> {
         this.logger.log(`Generating POT for ${contentBinding}`);
+        tokenMinter.used = true;
         try {
             const poToken =
                 await tokenMinter.minter.mintAsWebsafeString(contentBinding);

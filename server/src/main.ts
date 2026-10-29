@@ -133,7 +133,7 @@ async function startServer() {
 
 startServer();
 
-const sessionManager = new SessionManager();
+const sessionManager = new SessionManager(true, undefined, true);
 httpServer.get("/", async (request, response) => {
     response
         .status(400)
