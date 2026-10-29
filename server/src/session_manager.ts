@@ -190,6 +190,10 @@ export class SessionManager {
     private static readonly REQUEST_KEY = "O43z0dpjhgX20SCx4KAo";
     private static hasDom = false;
     private _minterCache: MinterCache = new Map();
+    // Minters being generated, keyed like _minterCache, so concurrent
+    // requests share one BotGuard run instead of each starting their own
+    private _pendingMinters = new Map<string, Promise<TokenMinter>>();
+    private _interpreterCache?: { url: string; js: string };
     private TOKEN_TTL_HOURS: number;
     private logger: Logger;
 
@@ -363,10 +367,10 @@ export class SessionManager {
             const { program, globalName, interpreterHash } = challenge;
             const { privateDoNotAccessOrElseTrustedResourceUrlWrappedValue } =
                 challenge.interpreterUrl;
-            const interpreterJSResponse = await potCtx.fetch(
+            const interpreterJS = await this.getInterpreterJS(
+                potCtx,
                 `https:${privateDoNotAccessOrElseTrustedResourceUrlWrappedValue}`,
             );
-            const interpreterJS = await interpreterJSResponse.text();
             return {
                 program,
                 globalName,
@@ -384,7 +388,43 @@ export class SessionManager {
         }
     }
 
-    private async generateTokenMinter(
+    // The interpreter URL is versioned, so the script only needs to be
+    // fetched again when YouTube rotates it
+    private async getInterpreterJS(
+        potCtx: PotContext,
+        url: string,
+    ): Promise<string> {
+        if (this._interpreterCache?.url === url)
+            return this._interpreterCache.js;
+        const interpreterJSResponse = await potCtx.fetch(url);
+        const js = await interpreterJSResponse.text();
+        this._interpreterCache = { url, js };
+        return js;
+    }
+
+    private generateTokenMinter(
+        cacheSpec: CacheSpec,
+        potCtx: PotContext,
+        challenge?: ChallengeData,
+        innertubeContext?: InnertubeContext,
+    ): Promise<TokenMinter> {
+        const { key } = cacheSpec;
+        let pending = this._pendingMinters.get(key);
+        if (!pending) {
+            pending = this.createTokenMinter(
+                cacheSpec,
+                potCtx,
+                challenge,
+                innertubeContext,
+            ).finally(() => this._pendingMinters.delete(key));
+            this._pendingMinters.set(key, pending);
+        } else {
+            this.logger.debug("Waiting for in-flight minter generation");
+        }
+        return pending;
+    }
+
+    private async createTokenMinter(
         cacheSpec: CacheSpec,
         potCtx: PotContext,
         challenge?: ChallengeData,
@@ -510,6 +550,7 @@ export class SessionManager {
         proxySpec: ProxySpec,
         maxRetries: number,
         intervalMs: number,
+        timeoutMs: number,
     ): PotContext["fetch"] {
         const { logger } = this;
         return async (url: any, options: any): Promise<any> => {
@@ -521,6 +562,9 @@ export class SessionManager {
                         params: options?.params,
                         httpsAgent: proxySpec.asDispatcher(logger),
                         proxy: false,
+                        // axios waits forever by default, so a stalled
+                        // proxy connection would hang the whole request
+                        timeout: timeoutMs,
                     };
                     const response = await (method === "GET"
                         ? axios.get(url, axiosOpt)
@@ -578,7 +622,7 @@ export class SessionManager {
             innertubeContext?.client.remoteHost || null,
         );
 
-        const bgFetch = this.getFetch(pxySpec, 3, 5000);
+        const bgFetch = this.getFetch(pxySpec, 3, 5000, 10000);
         let innertube: Innertube | undefined = undefined;
         if (!contentBinding && innertubeContext) {
             this.logger.warn(
