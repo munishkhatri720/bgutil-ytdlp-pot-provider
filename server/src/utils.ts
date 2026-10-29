@@ -2,6 +2,11 @@ import { BgError } from "bgutils-js/utils";
 
 export const VERSION = "2.0.2";
 
+// Seconds since a performance.now() timestamp, formatted for logs
+export function elapsed(start: number): string {
+    return `${((performance.now() - start) / 1000).toFixed(2)}s`;
+}
+
 export function strerror(e: any, update?: boolean): string {
     const msg =
         e instanceof BgError

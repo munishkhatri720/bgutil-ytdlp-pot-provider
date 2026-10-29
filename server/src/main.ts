@@ -1,5 +1,5 @@
 import { InvalidProxyError, SessionManager } from "./session_manager.ts";
-import { strerror, VERSION } from "./utils.ts";
+import { elapsed, strerror, VERSION } from "./utils.ts";
 import { Command } from "commander";
 import express from "express";
 import crypto from "node:crypto";
@@ -170,6 +170,7 @@ httpServer.post("/get_pot", async (request, response) => {
     const disableTlsVerification: boolean =
         body.disable_tls_verification || false;
 
+    const start = performance.now();
     try {
         const sessionData = await sessionManager.generatePoToken(
             contentBinding,
@@ -184,6 +185,7 @@ httpServer.post("/get_pot", async (request, response) => {
         response.send(sessionData);
     } catch (e) {
         const msg = strerror(e, /*update=*/ true);
+        console.error(`POT request failed after ${elapsed(start)}: ${msg}`);
         if (!(e instanceof InvalidProxyError)) console.error(e.stack);
         response.status(e instanceof InvalidProxyError ? 400 : 500).send({
             error: msg,
